@@ -1,0 +1,212 @@
+/**
+ * tracer-car 2 电机编码器闭环配置（S28A/S27F 实测接线）
+ * @cliArgs --device "MSPM0G350X" --part "Default" --package "LQFP-64(PM)" --product "mspm0_sdk@2.02.00.05"
+ * @v2CliArgs --device "MSPM0G3507" --package "LQFP-64(PM)" --product "mspm0_sdk@2.02.00.05"
+ * @versions {"tool":"1.21.0+3721"}
+ *
+ * 实测接线（来自底板资源分配图）：
+ *   - UART0: PA10(TX) / PA11(RX), 115200 baud → 调试日志 + OpenMV RX 共用
+ *   - LED:   PB9                        → 板载状态指示灯
+ *   - KEY:   PB8                        → USER 启动按键（低有效）
+ *   - 时钟:  HFXT 40MHz 外部晶振        → 系统主时钟 80MHz
+ *   - SWD:   PA19/PA20                  → 调试口（默认）
+ *
+ *   - 左轮电机 A:
+ *       AIN1 = PA13  (方向)
+ *       AIN2 = PA14  (方向)
+ *       PWMA = PB2   (PWM,Step B 升级为 TIMG6)
+ *       编码器 A 相 = PA25 (下降沿 EXTI)
+ *       编码器 B 相 = PA26 (输入)
+ *   - 右轮电机 B:
+ *       BIN1 = PA17  (方向)
+ *       BIN2 = PA16  (方向)
+ *       PWMB = PB3   (PWM,Step B 升级为 TIMG6)
+ *       编码器 A 相 = PB20 (下降沿 EXTI)
+ *       编码器 B 相 = PB24 (输入)
+ *
+ *   STBY 硬接 3.3V 常使能（不占 GPIO）
+ *
+ * SysTick (Cortex-M0+ 自带,1kHz) 用于 PI 闭环 + 系统时钟,
+ *   不依赖 SysConfig Timer 模块
+ */
+
+const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
+const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
+
+/* ---------- 时钟:HFXT 40MHz 外部晶振,主时钟 80MHz ---------- */
+const divider9       = system.clockTree["UDIV"];
+divider9.divideValue = 2;
+
+const mux4       = system.clockTree["EXHFMUX"];
+mux4.inputSelect = "EXHFMUX_XTAL";
+
+const mux8       = system.clockTree["HSCLKMUX"];
+mux8.inputSelect = "HSCLKMUX_SYSPLL2X";
+
+const mux12       = system.clockTree["SYSPLLMUX"];
+mux12.inputSelect = "zSYSPLLMUX_HFCLK";
+
+const pinFunction4        = system.clockTree["HFXT"];
+pinFunction4.inputFreq    = 40;
+pinFunction4.enable       = true;
+pinFunction4.HFCLKMonitor = true;
+pinFunction4.HFXTStartup  = 20;
+
+const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
+
+/* ---------- LED1:PB9 板载状态灯 ---------- */
+const GPIO1 = GPIO.addInstance();
+GPIO1.$name                          = "LED1";
+GPIO1.associatedPins.length          = 1;
+GPIO1.associatedPins[0].$name        = "PIN_9";
+GPIO1.associatedPins[0].ioStructure  = "SD";
+GPIO1.associatedPins[0].assignedPort = "PORTB";
+GPIO1.associatedPins[0].assignedPin  = "9";
+GPIO1.associatedPins[0].pin.$assign  = "PB9";
+
+/* ---------- UART0:PA10(TX) / PA11(RX), 115200 baud ---------- */
+const UART1 = UART.addInstance();
+UART1.$name                        = "UART_0";
+UART1.targetBaudRate               = 115200;
+UART1.peripheral.$assign           = "UART0";
+UART1.peripheral.rxPin.$assign     = "PA11";
+UART1.peripheral.txPin.$assign     = "PA10";
+UART1.txPinConfig.$name            = "ti_driverlib_gpio_GPIOPinGeneric0";
+UART1.txPinConfig.enableConfig     = true;
+UART1.txPinConfig.internalResistor = "PULL_UP";
+UART1.rxPinConfig.$name            = "ti_driverlib_gpio_GPIOPinGeneric1";
+UART1.rxPinConfig.enableConfig     = true;
+UART1.rxPinConfig.internalResistor = "PULL_UP";
+
+SYSCTL.forceDefaultClkConfig = true;
+SYSCTL.clockTreeEn           = true;
+SYSCTL.validateClkStatus     = true;
+
+/* ---------- SWD 调试口(锁定建议,避免被其他外设占用) ---------- */
+pinFunction4.peripheral.$suggestSolution           = "SYSCTL";
+pinFunction4.peripheral.hfxInPin.$suggestSolution  = "PA5";
+pinFunction4.peripheral.hfxOutPin.$suggestSolution = "PA6";
+Board.peripheral.$suggestSolution                  = "DEBUGSS";
+Board.peripheral.swclkPin.$suggestSolution         = "PA20";
+Board.peripheral.swdioPin.$suggestSolution         = "PA19";
+
+/* ============================================================
+ *  MOTOR_DIR: TB6612 方向脚 (4 路 GPIO 输出, 全在 GPIOA)
+ *    名称沿用 LF/LR/RF/RR 兼容 motor.c 的 MotorChannel_t 枚举
+ *    实际含义:
+ *      LF = 左轮 AIN1 (PA13)    LR = 左轮 AIN2 (PA14)
+ *      RF = 右轮 BIN1 (PA17)    RR = 右轮 BIN2 (PA16)
+ * ============================================================ */
+const GPIO2 = GPIO.addInstance();
+GPIO2.$name = "MOTOR_DIR";
+GPIO2.associatedPins.length = 4;
+
+GPIO2.associatedPins[0].$name        = "LF";
+GPIO2.associatedPins[0].assignedPort = "PORTA";
+GPIO2.associatedPins[0].assignedPin  = "13";
+GPIO2.associatedPins[0].pin.$assign  = "PA13";
+GPIO2.associatedPins[0].ioStructure  = "SD";
+GPIO2.associatedPins[0].initialValue = "LOW";
+
+GPIO2.associatedPins[1].$name        = "LR";
+GPIO2.associatedPins[1].assignedPort = "PORTA";
+GPIO2.associatedPins[1].assignedPin  = "14";
+GPIO2.associatedPins[1].pin.$assign  = "PA14";
+GPIO2.associatedPins[1].ioStructure  = "SD";
+GPIO2.associatedPins[1].initialValue = "LOW";
+
+GPIO2.associatedPins[2].$name        = "RF";
+GPIO2.associatedPins[2].assignedPort = "PORTA";
+GPIO2.associatedPins[2].assignedPin  = "17";
+GPIO2.associatedPins[2].pin.$assign  = "PA17";
+GPIO2.associatedPins[2].ioStructure  = "SD";
+GPIO2.associatedPins[2].initialValue = "LOW";
+
+GPIO2.associatedPins[3].$name        = "RR";
+GPIO2.associatedPins[3].assignedPort = "PORTA";
+GPIO2.associatedPins[3].assignedPin  = "16";
+GPIO2.associatedPins[3].pin.$assign  = "PA16";
+GPIO2.associatedPins[3].ioStructure  = "SD";
+GPIO2.associatedPins[3].initialValue = "LOW";
+
+/* ============================================================
+ *  MOTOR_PWM: TB6612 PWM 脚 (2 路 GPIO,Step A 软件 PWM)
+ *    Step B 会把 PB2/PB3 改成 TIMG6 真 PWM
+ *    当前先用 GPIO 拉高/拉低模拟 100%/0% 占空比
+ * ============================================================ */
+const GPIO3 = GPIO.addInstance();
+GPIO3.$name = "MOTOR_PWM";
+GPIO3.associatedPins.length = 2;
+
+GPIO3.associatedPins[0].$name        = "PWMA";
+GPIO3.associatedPins[0].assignedPort = "PORTB";
+GPIO3.associatedPins[0].assignedPin  = "2";
+GPIO3.associatedPins[0].pin.$assign  = "PB2";
+GPIO3.associatedPins[0].ioStructure  = "SD";
+GPIO3.associatedPins[0].initialValue = "LOW";
+
+GPIO3.associatedPins[1].$name        = "PWMB";
+GPIO3.associatedPins[1].assignedPort = "PORTB";
+GPIO3.associatedPins[1].assignedPin  = "3";
+GPIO3.associatedPins[1].pin.$assign  = "PB3";
+GPIO3.associatedPins[1].ioStructure  = "SD";
+GPIO3.associatedPins[1].initialValue = "LOW";
+
+/* ============================================================
+ *  ENC_A: 编码器 A 相 (下降沿 EXTI)
+ *    左编码器 A_LF = PA25 (GPIOA, 触发 GPIOA_IRQHandler)
+ *    右编码器 A_RF = PB20 (GPIOB, 触发 GPIOB_IRQHandler)
+ * ============================================================ */
+const GPIO4 = GPIO.addInstance();
+GPIO4.$name = "ENC_A";
+GPIO4.associatedPins.length = 2;
+
+GPIO4.associatedPins[0].$name        = "A_LF";
+GPIO4.associatedPins[0].assignedPort = "PORTA";
+GPIO4.associatedPins[0].assignedPin  = "25";
+GPIO4.associatedPins[0].pin.$assign  = "PA25";
+GPIO4.associatedPins[0].internalResistor = "PULL_UP";
+GPIO4.associatedPins[0].intTrigger   = "FALLING_EDGE";
+
+GPIO4.associatedPins[1].$name        = "A_RF";
+GPIO4.associatedPins[1].assignedPort = "PORTB";
+GPIO4.associatedPins[1].assignedPin  = "20";
+GPIO4.associatedPins[1].pin.$assign  = "PB20";
+GPIO4.associatedPins[1].internalResistor = "PULL_UP";
+GPIO4.associatedPins[1].intTrigger   = "FALLING_EDGE";
+
+/* ============================================================
+ *  ENC_B: 编码器 B 相 (输入,无中断)
+ *    左编码器 B_LF = PA26 (GPIOA)
+ *    右编码器 B_RF = PB24 (GPIOB)
+ * ============================================================ */
+const GPIO5 = GPIO.addInstance();
+GPIO5.$name = "ENC_B";
+GPIO5.associatedPins.length = 2;
+
+GPIO5.associatedPins[0].$name        = "B_LF";
+GPIO5.associatedPins[0].assignedPort = "PORTA";
+GPIO5.associatedPins[0].assignedPin  = "26";
+GPIO5.associatedPins[0].pin.$assign  = "PA26";
+GPIO5.associatedPins[0].internalResistor = "PULL_UP";
+
+GPIO5.associatedPins[1].$name        = "B_RF";
+GPIO5.associatedPins[1].assignedPort = "PORTB";
+GPIO5.associatedPins[1].assignedPin  = "24";
+GPIO5.associatedPins[1].pin.$assign  = "PB24";
+GPIO5.associatedPins[1].internalResistor = "PULL_UP";
+
+/* ============================================================
+ *  KEY_USER: 启动按键 PB8 (下降沿 EXTI, 低有效)
+ *    boot 后按一下进入 START 状态
+ * ============================================================ */
+const GPIO6 = GPIO.addInstance();
+GPIO6.$name = "KEY_USER";
+GPIO6.associatedPins.length = 1;
+GPIO6.associatedPins[0].$name        = "KEY";
+GPIO6.associatedPins[0].assignedPort = "PORTB";
+GPIO6.associatedPins[0].assignedPin  = "8";
+GPIO6.associatedPins[0].pin.$assign  = "PB8";
+GPIO6.associatedPins[0].internalResistor = "PULL_UP";
+GPIO6.associatedPins[0].intTrigger   = "FALLING_EDGE";
