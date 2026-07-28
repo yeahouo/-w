@@ -469,6 +469,26 @@
               <FileType>1</FileType>
               <FilePath>..\Module\button.c</FilePath>
             </File>
+            <File>
+              <FileName>line_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Module\line_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>motor_drive.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Module\motor_drive.c</FilePath>
+            </File>
+            <File>
+              <FileName>tm1637.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Module\tm1637.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_debug.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Module\uart_debug.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
