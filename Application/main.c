@@ -217,7 +217,7 @@ static void line_control_v6(uint8_t bits)
                        (s_v6_l2_tick > 0 && (now - s_v6_l2_tick) <= V6_CORNER_WINDOW_MS &&
                         s_v6_l1_tick > 0 && (now - s_v6_l1_tick) <= V6_CORNER_WINDOW_MS);
 
-    if (right_corner || left_corner) {
+    if (0 && (right_corner || left_corner)) {   /* 直角禁用 (不考虑直角道, 6 路位重映射后待适配) */
         s_v6_phase = V6_PHASE_CORNER_SPIN;
         s_v6_spin_start_tick = now;
         s_v6_spin_dir = right_corner ? +1 : -1;
@@ -229,45 +229,46 @@ static void line_control_v6(uint8_t bits)
         return;
     }
 
-    /* 场景 1: M 单独命中 = 直行 */
-    if (bits == 0b00100) {
+    /* 场景 1: 中间 S3/S4 命中且最外无 = 直行 */
+    if ((bits & 0b001100) && !(bits & 0b110011)) {
         s_v6_m_only_tick = now;
         s_v6_has_m_baseline = true;
         s_v6_last_err = 0;
         s_v6_correct_count = 0;
         s_v6_correct_dir = 0;
-        MotorDrive_Set(3, 1, 3, 1);
+        MotorDrive_Set(4, 1, 4, 1);
         return;
     }
 
     /* 场景 2: 丢线 → 按 last_err 方向追线 */
     if (bits == 0) {
         err = s_v6_last_err;
-        if      (err < 0) { dl = 1; dr = 3; }
-        else if (err > 0) { dl = 3; dr = 1; }
-        else              { dl = 3; dr = 3; }
+        if      (err < 0) { dl = 1; dr = 4; }
+        else if (err > 0) { dl = 4; dr = 1; }
+        else              { dl = 4; dr = 4; }
         MotorDrive_Set(dl, 1, dr, 1);
         return;
     }
 
-    /* bits → err (最外优先) */
-    if      (bits & 0b00010) err = -2;   /* L2 外侧左 */
-    else if (bits & 0b10000) err = +2;   /* R2 外侧右 */
-    else if (bits & 0b00001) err = -1;   /* L1 内侧左 */
-    else if (bits & 0b01000) err = +1;   /* R1 内侧右 */
+    /* bits → err (6 路, 最外优先; bit0=S1最左 .. bit5=S6最右) */
+    if      (bits & 0b000001) err = -2;   /* S1 最左 */
+    else if (bits & 0b100000) err = +2;   /* S6 最右 */
+    else if (bits & 0b000010) err = -1;   /* S2 次左 */
+    else if (bits & 0b010000) err = +1;   /* S5 次右 */
+    else if (bits & 0b001100) err =  0;   /* S3/S4 中间 = 直行 */
     else                      err =  0;
 
-    err = (int8_t)(-err);   /* 实测转向反: 反转 err 极性 (左碰→右转, 右碰→左转) */
+    err = (int8_t)(-err);   /* 转向修正 (左碰→右转, 右碰→左转) */
 
     s_v6_last_err = err;
 
     /* 场景 3: 次外命中 (err=±1) 且 M 也命中 且 有基准 → 夹角修正 + 方向锁 */
-    bool m_active = (bits & 0b00100) != 0;
+    bool m_active = (bits & 0b001100) != 0;   /* S3/S4 中间任一活跃 */
     if (m_active && (err == -1 || err == +1) && s_v6_has_m_baseline) {
         int8_t needed_dir = (err < 0) ? +1 : -1;
 
         if (s_v6_correct_dir != 0 && s_v6_correct_dir != needed_dir) {
-            MotorDrive_Set(3, 1, 3, 1);   /* 反向请求 → 直行等回正 */
+            MotorDrive_Set(4, 1, 4, 1);   /* 反向请求 → 直行等回正 */
             return;
         }
 
@@ -278,24 +279,24 @@ static void line_control_v6(uint8_t bits)
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
         if (escalate || dt < V6_DT_FAST_MS) {
-            if (err < 0) { dl = 1; dr = 3; }
-            else         { dl = 3; dr = 1; }
+            if (err < 0) { dl = 1; dr = 4; }
+            else         { dl = 4; dr = 1; }
         } else if (dt < V6_DT_SLOW_MS) {
-            if (err < 0) { dl = 2; dr = 3; }
-            else         { dl = 3; dr = 2; }
+            if (err < 0) { dl = 2; dr = 4; }
+            else         { dl = 4; dr = 2; }
         } else {
-            dl = 3; dr = 3;
+            dl = 4; dr = 4;
         }
     }
     /* 场景 4: 其他 → 查表 */
     else {
         switch (err) {
-            case -2:  dl = 1; dr = 3; break;
-            case -1:  dl = 2; dr = 3; break;
-            case  0:  dl = 3; dr = 3; break;
-            case +1:  dl = 3; dr = 2; break;
-            case +2:  dl = 3; dr = 1; break;
-            default:  dl = 3; dr = 3; break;
+            case -2:  dl = 1; dr = 4; break;
+            case -1:  dl = 2; dr = 4; break;
+            case  0:  dl = 4; dr = 4; break;
+            case +1:  dl = 4; dr = 2; break;
+            case +2:  dl = 4; dr = 1; break;
+            default:  dl = 4; dr = 4; break;
         }
     }
 
@@ -524,11 +525,12 @@ int main(void)
             UART_Print(" bits="); UART_PrintU32(bits);
             UART_Print(" vL=");   UART_PrintU32(MotorDrive_GetLeftDuty());
             UART_Print(" vR=");   UART_PrintU32(MotorDrive_GetRightDuty());
-            UART_Print(" L1=");   UART_Putc((char)('0' + ((bits >> 0) & 1)));
-            UART_Print(" L2=");   UART_Putc((char)('0' + ((bits >> 1) & 1)));
-            UART_Print(" M=");    UART_Putc((char)('0' + ((bits >> 2) & 1)));
-            UART_Print(" R1=");   UART_Putc((char)('0' + ((bits >> 3) & 1)));
-            UART_Print(" R2=");   UART_Putc((char)('0' + ((bits >> 4) & 1)));
+            UART_Print(" S1=");   UART_Putc((char)('0' + ((bits >> 0) & 1)));
+            UART_Print(" S2=");   UART_Putc((char)('0' + ((bits >> 1) & 1)));
+            UART_Print(" S3=");   UART_Putc((char)('0' + ((bits >> 2) & 1)));
+            UART_Print(" S4=");   UART_Putc((char)('0' + ((bits >> 3) & 1)));
+            UART_Print(" S5=");   UART_Putc((char)('0' + ((bits >> 4) & 1)));
+            UART_Print(" S6=");   UART_Putc((char)('0' + ((bits >> 5) & 1)));
             UART_Print("\r\n");
         }
 

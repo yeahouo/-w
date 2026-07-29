@@ -1,10 +1,11 @@
 /**
  * @file line_sensor.c
- * @brief 5 路灰度传感器读取实现 — 多次采样 + 多数表决 (v6.2)
+ * @brief 6 路灰度传感器读取实现 — 多次采样 + 多数表决 (v6.2)
  *
- * 引脚: L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9
- *       L1 在 GPIOB, 其余在 GPIOA
- * 当前只用 3 路 (L1/M/R1); L2/R2 未装, LineSensor_Read 强制清零 (空响应)
+ * 引脚 (从左到右 S1..S6):
+ *   S1=OUT7=PA12  S2=OUT6=PB17  S3=OUT5=PA22
+ *   S4=OUT4=PB16  S5=OUT3=PA27  S6=OUT2=PA9
+ *   S1/S3/S5/S6 在 GPIOA, S2/S4 在 GPIOB
  *
  * 目的: 补偿硬件灵敏度不足 (检测延迟 / 压线不触发 / 边缘模糊)
  * 做法: 每次调用连读 N 次 (间隔 NOP), 每路累计命中次数
@@ -15,24 +16,26 @@
 #include "line_sensor.h"
 
 /* ============================================================
- *  引脚定义
+ *  引脚定义 (从左到右 S1..S6)
  * ============================================================ */
 #define LINE_ACTIVE_LEVEL  0   /* 0 = 黑线时读到 0;  1 = 黑线时读到 1 */
 
-#define L1_PINCM   IOMUX_PINCM43   /* PB17 */
-#define L2_PINCM   IOMUX_PINCM34   /* PA12 */
-#define M_PINCM    IOMUX_PINCM47   /* PA22 */
-#define R1_PINCM   IOMUX_PINCM60   /* PA27 */
-#define R2_PINCM   IOMUX_PINCM20   /* PA9  */
+#define S1_PINCM   IOMUX_PINCM34   /* PA12, OUT7, 最左 */
+#define S2_PINCM   IOMUX_PINCM43   /* PB17, OUT6 */
+#define S3_PINCM   IOMUX_PINCM47   /* PA22, OUT5 */
+#define S4_PINCM   IOMUX_PINCM33   /* PB16, OUT4 */
+#define S5_PINCM   IOMUX_PINCM60   /* PA27, OUT3 */
+#define S6_PINCM   IOMUX_PINCM20   /* PA9,  OUT2, 最右 */
 
-#define L1_PIN     DL_GPIO_PIN_17
-#define L2_PIN     DL_GPIO_PIN_12
-#define M_PIN      DL_GPIO_PIN_22
-#define R1_PIN     DL_GPIO_PIN_27
-#define R2_PIN     DL_GPIO_PIN_9
+#define S1_PIN     DL_GPIO_PIN_12
+#define S2_PIN     DL_GPIO_PIN_17
+#define S3_PIN     DL_GPIO_PIN_22
+#define S4_PIN     DL_GPIO_PIN_16
+#define S5_PIN     DL_GPIO_PIN_27
+#define S6_PIN     DL_GPIO_PIN_9
 
-#define LINE_PINS_A_MASK  (L2_PIN | M_PIN | R1_PIN | R2_PIN)   /* GPIOA */
-#define LINE_PINS_B_MASK  (L1_PIN)                             /* GPIOB */
+#define LINE_PINS_A_MASK  (S1_PIN | S3_PIN | S5_PIN | S6_PIN)   /* GPIOA */
+#define LINE_PINS_B_MASK  (S2_PIN | S4_PIN)                     /* GPIOB */
 
 /* ============================================================
  *  多数表决参数
@@ -53,59 +56,60 @@ static inline void sensor_delay(void)
  * ============================================================ */
 void LineSensor_Init(void)
 {
-    /* 5 路: 数字输入 + 内部上拉
-     * (当前灰度未装, main.c 暂不调用; 装上后取消 main.c 条件编译) */
-    DL_GPIO_initDigitalInputFeatures(L1_PINCM,
+    /* 6 路: 数字输入 + 内部上拉 */
+    DL_GPIO_initDigitalInputFeatures(S1_PINCM,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initDigitalInputFeatures(L2_PINCM,
+    DL_GPIO_initDigitalInputFeatures(S2_PINCM,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initDigitalInputFeatures(M_PINCM,
+    DL_GPIO_initDigitalInputFeatures(S3_PINCM,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initDigitalInputFeatures(R1_PINCM,
+    DL_GPIO_initDigitalInputFeatures(S4_PINCM,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initDigitalInputFeatures(R2_PINCM,
+    DL_GPIO_initDigitalInputFeatures(S5_PINCM,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initDigitalInputFeatures(S6_PINCM,
         DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 }
 
 uint8_t LineSensor_Read(void)
 {
-    uint8_t l1_cnt = 0, l2_cnt = 0, m_cnt = 0, r1_cnt = 0, r2_cnt = 0;
+    uint8_t s1_cnt = 0, s2_cnt = 0, s3_cnt = 0, s4_cnt = 0, s5_cnt = 0, s6_cnt = 0;
 
     /* 多次采样 + 累计 */
     for (uint8_t i = 0; i < V6_SENSOR_SAMPLES; i++) {
         uint32_t a = DL_GPIO_readPins(GPIOA, LINE_PINS_A_MASK);
         uint32_t b = DL_GPIO_readPins(GPIOB, LINE_PINS_B_MASK);
 
-        uint8_t l1 = (b & L1_PIN) ? 1 : 0;
-        uint8_t l2 = (a & L2_PIN) ? 1 : 0;
-        uint8_t m  = (a & M_PIN)  ? 1 : 0;
-        uint8_t r1 = (a & R1_PIN) ? 1 : 0;
-        uint8_t r2 = (a & R2_PIN) ? 1 : 0;
+        uint8_t s1 = (a & S1_PIN) ? 1 : 0;
+        uint8_t s2 = (b & S2_PIN) ? 1 : 0;
+        uint8_t s3 = (a & S3_PIN) ? 1 : 0;
+        uint8_t s4 = (b & S4_PIN) ? 1 : 0;
+        uint8_t s5 = (a & S5_PIN) ? 1 : 0;
+        uint8_t s6 = (a & S6_PIN) ? 1 : 0;
 
 #if LINE_ACTIVE_LEVEL == 1
-        l1 ^= 1; l2 ^= 1; m ^= 1; r1 ^= 1; r2 ^= 1;
+        s1 ^= 1; s2 ^= 1; s3 ^= 1; s4 ^= 1; s5 ^= 1; s6 ^= 1;
 #endif
 
-        l1_cnt += l1; l2_cnt += l2; m_cnt += m;
-        r1_cnt += r1; r2_cnt += r2;
+        s1_cnt += s1; s2_cnt += s2; s3_cnt += s3;
+        s4_cnt += s4; s5_cnt += s5; s6_cnt += s6;
 
         if (i < V6_SENSOR_SAMPLES - 1) sensor_delay();
     }
 
     /* 多数表决 */
-    uint8_t l1 = (l1_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
-    uint8_t l2 = (l2_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
-    uint8_t m  = (m_cnt  >= V6_SENSOR_THRESHOLD) ? 1 : 0;
-    uint8_t r1 = (r1_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
-    uint8_t r2 = (r2_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s1 = (s1_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s2 = (s2_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s3 = (s3_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s4 = (s4_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s5 = (s5_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+    uint8_t s6 = (s6_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
 
-    /* L2/R2 未装, 空响应 — 强制无黑线, 不参与循迹 */
-    l2 = 0; r2 = 0;
-
-    return (uint8_t)((l1 << 0) | (l2 << 1) | (m << 2) | (r1 << 3) | (r2 << 4));
+    return (uint8_t)((s1 << 0) | (s2 << 1) | (s3 << 2) | (s4 << 3) | (s5 << 4) | (s6 << 5));
 }
