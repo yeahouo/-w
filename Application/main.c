@@ -279,11 +279,11 @@ static void line_control_v6(uint8_t bits)
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
         if (escalate || dt < V6_DT_FAST_MS) {
-            if (err < 0) { dl = 1; dr = 4; }
-            else         { dl = 4; dr = 1; }
-        } else if (dt < V6_DT_SLOW_MS) {
             if (err < 0) { dl = 2; dr = 4; }
             else         { dl = 4; dr = 2; }
+        } else if (dt < V6_DT_SLOW_MS) {
+            if (err < 0) { dl = 3; dr = 4; }
+            else         { dl = 4; dr = 3; }
         } else {
             dl = 4; dr = 4;
         }
@@ -292,9 +292,9 @@ static void line_control_v6(uint8_t bits)
     else {
         switch (err) {
             case -2:  dl = 1; dr = 4; break;
-            case -1:  dl = 2; dr = 4; break;
+            case -1:  dl = 1; dr = 4; break;
             case  0:  dl = 4; dr = 4; break;
-            case +1:  dl = 4; dr = 2; break;
+            case +1:  dl = 4; dr = 1; break;
             case +2:  dl = 4; dr = 1; break;
             default:  dl = 4; dr = 4; break;
         }

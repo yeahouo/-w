@@ -30,7 +30,7 @@
 #define PWM_PINS_MASK   (PWMA_PIN | PWMB_PIN)
 
 /* 电机极性: +1=默认, -1=翻转。
- * 实测两轮同向安装 (+1 时皆后退), 两轮都翻 (-1) 使 dir=1 = 物理前进。 */
+ * 两轮同向安装 (+1 时皆后退), 两轮都翻 (-1) 使 dir=1 = 物理前进 (车头朝前)。 */
 #define LEFT_MOTOR_POLARITY   (-1)
 #define RIGHT_MOTOR_POLARITY  (-1)
 
