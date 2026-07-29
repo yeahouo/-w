@@ -8,7 +8,7 @@
  *   循迹算法: line_tracker(v8, Algorithm/) + v6/v7 查表(本文件)
  *   本文件:   SysTick 调度 + v6/v7 查表控制 + v7 主状态机 + 测试开关编排
  *
- * 传感器: 5 路灰度 (当前未装, PB17/PA12 让给 TM1637; 装上后启用 LineSensor_Init)
+ * 传感器: 5 路灰度 L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9 (TM1637 数码管已停用)
  * 算法切换: LINE_FOLLOW_VERSION (6/7/8)
  */
 
@@ -45,7 +45,7 @@
 /* ============================================================
  *  测试模式开关
  * ============================================================ */
-#define TM1637_TEST      1   /* =1 只跑数码管自检(1→…→9→0), 跳过循迹 */
+#define TM1637_TEST      0   /* =1 只跑数码管自检; =0 走循迹 (灰度已启用) */
 #define OLED_TEST        1   /* =1 周期把运行秒数刷到屏 (不阻断主循环) */
 #define MOTOR_TEST_DRIVE 0   /* =1 两轮固定直行 (验证电机用, 测完改 0) */
 
@@ -257,6 +257,8 @@ static void line_control_v6(uint8_t bits)
     else if (bits & 0b01000) err = +1;   /* R1 内侧右 */
     else                      err =  0;
 
+    err = (int8_t)(-err);   /* 实测转向反: 反转 err 极性 (左碰→右转, 右碰→左转) */
+
     s_v6_last_err = err;
 
     /* 场景 3: 次外命中 (err=±1) 且 M 也命中 且 有基准 → 夹角修正 + 方向锁 */
@@ -337,11 +339,11 @@ int main(void)
 
     MotorDrive_Init();          /* 电机引脚 (AIN/AIN2/BIN1/2 + PWMA/B) */
 
-#if 0  /* 灰度传感器未装, 注释释放引脚 (PB17/PA12 给数码管); 装上后启用 */
-    LineSensor_Init();
-#endif
+    LineSensor_Init();          /* 5 路灰度: L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9 */
 
-    TM1637_Init();              /* 数码管 CLK=PB17 / DIO=PA12 */
+#if 0  /* 数码管已停用 (PB17/PA12 还给灰度 L1/L2); 需要时改回 1 */
+    TM1637_Init();
+#endif
 
     /* OLED (SSD1306 软件 SPI): SCL=PA28 SDA=PA31 RES=PB14 DC=PB15, CS 接 GND */
     DL_GPIO_initDigitalOutput(IOMUX_PINCM3);    /* PA28 SCL */

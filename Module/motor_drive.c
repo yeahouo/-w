@@ -30,10 +30,9 @@
 #define PWM_PINS_MASK   (PWMA_PIN | PWMB_PIN)
 
 /* 电机极性: +1=默认, -1=翻转。
- * 实测: 左轮接线反向 (原始 dir=1 物理后退), 右轮正常;
- * 故翻转左轮, 两轮 dir=1 统一为物理前进。实测仍不对则把对应侧 +1/-1 互换。 */
+ * 实测两轮同向安装 (+1 时皆后退), 两轮都翻 (-1) 使 dir=1 = 物理前进。 */
 #define LEFT_MOTOR_POLARITY   (-1)
-#define RIGHT_MOTOR_POLARITY  (+1)
+#define RIGHT_MOTOR_POLARITY  (-1)
 
 /* 软件 PWM: SysTick 2kHz × 20 档 → 100Hz PWM, 占空比 0~20 */
 #define PWM_PHASE_MAX   20

@@ -4,6 +4,7 @@
  *
  * 引脚: L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9
  *       L1 在 GPIOB, 其余在 GPIOA
+ * 当前只用 3 路 (L1/M/R1); L2/R2 未装, LineSensor_Read 强制清零 (空响应)
  *
  * 目的: 补偿硬件灵敏度不足 (检测延迟 / 压线不触发 / 边缘模糊)
  * 做法: 每次调用连读 N 次 (间隔 NOP), 每路累计命中次数
@@ -102,6 +103,9 @@ uint8_t LineSensor_Read(void)
     uint8_t m  = (m_cnt  >= V6_SENSOR_THRESHOLD) ? 1 : 0;
     uint8_t r1 = (r1_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
     uint8_t r2 = (r2_cnt >= V6_SENSOR_THRESHOLD) ? 1 : 0;
+
+    /* L2/R2 未装, 空响应 — 强制无黑线, 不参与循迹 */
+    l2 = 0; r2 = 0;
 
     return (uint8_t)((l1 << 0) | (l2 << 1) | (m << 2) | (r1 << 3) | (r2 << 4));
 }
