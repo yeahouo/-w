@@ -156,12 +156,15 @@ static void line_control_simple(uint8_t bits)
 #define V6_DT_FAST_MS        (50u)
 #define V6_DT_SLOW_MS        (200u)
 #define V6_CORRECT_ESCALATE  (3u)
+#define V6_TURN_PULSE_MS     (50u)  /* 场景4 转弯脉冲: err变化后内侧强打方向持续时间 */
 
 static int8_t   s_v6_last_err = 0;
 static uint32_t s_v6_m_only_tick = 0;
 static bool     s_v6_has_m_baseline = false;
 static uint8_t  s_v6_correct_count = 0;
 static int8_t   s_v6_correct_dir = 0;
+static int8_t   s_v6_prev_err = 0;       /* 场景4: 上次 err (检测变化触发脉冲) */
+static uint32_t s_v6_err_change_ms = 0;  /* 场景4: err 最近变化时刻 */
 
 typedef enum {
     V6_PHASE_NORMAL = 0,
@@ -288,14 +291,21 @@ static void line_control_v6(uint8_t bits)
             dl = 4; dr = 4;
         }
     }
-    /* 场景 4: 其他 → 查表 */
+    /* 场景 4: 大偏离 → 脉冲+阻尼 (err变化瞬间内侧强打, 之后阻尼温和修正) */
     else {
+        if (err != s_v6_prev_err) {            /* err 变化 → 重置脉冲计时 */
+            s_v6_err_change_ms = now;
+            s_v6_prev_err = err;
+        }
+        /* 脉冲(< PULSE_MS)内侧1强打; 阻尼期: 大弯内侧2(略急), 小弯内侧3(温和) */
+        uint8_t damp = (err == -2 || err == +2) ? 2 : 3;
+        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? 1 : damp;
         switch (err) {
-            case -2:  dl = 1; dr = 4; break;
-            case -1:  dl = 1; dr = 4; break;
+            case -2:  dl = inner; dr = 4; break;
+            case -1:  dl = inner; dr = 4; break;
             case  0:  dl = 4; dr = 4; break;
-            case +1:  dl = 4; dr = 1; break;
-            case +2:  dl = 4; dr = 1; break;
+            case +1:  dl = 4; dr = inner; break;
+            case +2:  dl = 4; dr = inner; break;
             default:  dl = 4; dr = 4; break;
         }
     }
