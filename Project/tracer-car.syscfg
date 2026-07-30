@@ -210,3 +210,19 @@ GPIO6.associatedPins[0].assignedPin  = "8";
 GPIO6.associatedPins[0].pin.$assign  = "PB8";
 GPIO6.associatedPins[0].internalResistor = "PULL_UP";
 GPIO6.associatedPins[0].intTrigger   = "FALLING_EDGE";
+
+/* ============================================================
+ *  PWM_0: 舵机 TimerA0 CCP0=PA0, 50Hz (HWZ020 信号脚)
+ *    500-2500us 脉宽 (500=0°, 1500=90°, 2500=180°)
+ * ============================================================ */
+const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
+const PWM_0  = PWM.addInstance();
+PWM_0.$name                      = "PWM_0";
+PWM_0.peripheral.$assign         = "TIMA0";
+PWM_0.pwmMode                    = "EDGE_ALIGN";
+PWM_0.ccIndex                    = [0];
+PWM_0.peripheral.ccp0Pin.$assign = "PA0";
+PWM_0.PWM_CHANNEL_0.$name        = "ti_driverlib_pwm_PWMTimerCC0";
+PWM_0.PWM_CHANNEL_0.ccValue      = 1500;
+PWM_0.timerStartTimer            = true;
+PWM_0.pwmFrequency_Hz            = 50;

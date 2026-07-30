@@ -489,6 +489,11 @@
               <FileType>1</FileType>
               <FilePath>..\Module\uart_debug.c</FilePath>
             </File>
+            <File>
+              <FileName>servo.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Module\servo.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

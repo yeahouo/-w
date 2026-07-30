@@ -8,7 +8,7 @@
  *   循迹算法: line_tracker(v8, Algorithm/) + v6/v7 查表(本文件)
  *   本文件:   SysTick 调度 + v6/v7 查表控制 + v7 主状态机 + 测试开关编排
  *
- * 传感器: 5 路灰度 L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9 (TM1637 数码管已停用)
+ * 传感器: 6 路灰度 S1=PA12 S2=PB17 S3=PA22 S4=PB16 S5=PA27 S6=PA9 (TM1637 已停用)
  * 算法切换: LINE_FOLLOW_VERSION (6/7/8)
  */
 
@@ -23,6 +23,7 @@
 #include "motor_drive.h"
 #include "line_sensor.h"
 #include "uart_debug.h"
+#include "servo.h"
 
 /* ============================================================
  *  LINE_FOLLOW 版本开关 (改一个值切算法)
@@ -84,6 +85,7 @@ void SysTick_Handler(void)
     }
 
     MotorDrive_Tick();   /* 软件 PWM (模块内, 仅 GPIO 翻转, 中断安全) */
+    Servo_Tick();        /* 舵机软件 PWM (PA0, 50Hz) */
 
     if (++s_tick_100ms >= 200) {
         s_tick_100ms = 0;
@@ -98,7 +100,7 @@ void SysTick_Handler(void)
 }
 
 /* ============================================================
- *  v7 查表控制 — 5 路 bits → (duty_l, duty_r)
+ *  v7 查表控制 — 旧 5 路 bits (v7 未适配 6 路, 当前 LINE_FOLLOW_VERSION=6 不编译)
  *
  *  bits 约定: bit0=L1(最左) bit1=L2 bit2=M bit3=R1 bit4=R2(最右)
  *  转向约定: err<0(线在左) → vL<vR 左转追线; err>0(线在右) → vL>vR 右转追线
@@ -153,7 +155,7 @@ static void line_control_simple(uint8_t bits)
 #define V6_CORNER_WINDOW_MS  (50u)
 #define V6_CORNER_TIMEOUT_MS (1500u)
 #define V6_SPIN_DUTY         (3u)
-#define V6_DT_FAST_MS        (50u)
+#define V6_DT_FAST_MS        (30u)   /* 回正急档时间窗: 50→30 缩短强修, 减过冲摆动 */
 #define V6_DT_SLOW_MS        (200u)
 #define V6_CORRECT_ESCALATE  (3u)
 #define V6_TURN_PULSE_MS     (50u)  /* 场景4 转弯脉冲: err变化后内侧强打方向持续时间 */
@@ -349,8 +351,9 @@ int main(void)
     SYSCFG_DL_init();
 
     MotorDrive_Init();          /* 电机引脚 (AIN/AIN2/BIN1/2 + PWMA/B) */
+    Servo_Init();               /* 舵机软件 PWM (PA0) */
 
-    LineSensor_Init();          /* 5 路灰度: L1=PB17 L2=PA12 M=PA22 R1=PA27 R2=PA9 */
+    LineSensor_Init();          /* 6 路灰度: S1=PA12 S2=PB17 S3=PA22 S4=PB16 S5=PA27 S6=PA9 */
 
 #if 0  /* 数码管已停用 (PB17/PA12 还给灰度 L1/L2); 需要时改回 1 */
     TM1637_Init();
@@ -377,6 +380,20 @@ int main(void)
     OLED_Refresh();
     UART_Print("OLED init ok\r\n");
 
+    /* === boot 舵机测试: 中位±10° 小幅摆 (带连杆防堵转; 测完删) === */
+#if 0  /* 舵机暂禁, 随 Servo_Init 一起关 */
+    {
+        Servo_SetAngle(90);
+        uint32_t t = g_system_ms; while (g_system_ms - t < 1500) { }
+        Servo_SetAngle(100);
+        t = g_system_ms; while (g_system_ms - t < 1500) { }
+        Servo_SetAngle(80);
+        t = g_system_ms; while (g_system_ms - t < 1500) { }
+        Servo_SetAngle(90);
+        t = g_system_ms; while (g_system_ms - t < 1500) { }
+    }
+#endif
+
     /* USER 按键 (PB8) */
     Button_Init();
     UART_Print("button (PB8) init ok\r\n");
@@ -398,7 +415,12 @@ int main(void)
 #endif
 
     uint32_t boot_ms = g_system_ms;
-    uint32_t btn_count = 0;     /* USER 按键按下次数 */
+    /* 循迹启停状态机 (USER 键切换) + 计时 + OpenMV 占位 */
+    typedef enum { TRACK_STOP, TRACK_RUN } TrackState_t;
+    TrackState_t track_state    = TRACK_STOP;
+    uint32_t     track_start_ms = 0;
+    uint32_t     track_time_ms  = 0;
+    uint16_t     vis_x10        = 0;   /* OpenMV 视觉数据 ×10 (0-1000), 占位 0.0 (未装) */
 
     while (1) {
         if (!s_ctrl_flag) {
@@ -409,39 +431,57 @@ int main(void)
 
         uint32_t now = g_system_ms;
 
-        /* USER 按键: 检测到一次按下就计数 + 串口打印 */
+        /* USER 按键: 切换循迹启停 + 计时 */
         if (Button_Consume()) {
-            btn_count++;
-            UART_Print("button press cnt=");
-            UART_PrintU32(btn_count);
-            UART_Print("\r\n");
+            if (track_state == TRACK_STOP) {
+                track_state    = TRACK_RUN;
+                track_start_ms = now;
+                UART_Print(">>> TRACK START\r\n");
+            } else {
+                track_state   = TRACK_STOP;
+                track_time_ms = now - track_start_ms;
+                MotorDrive_Stop();
+                UART_Print(">>> TRACK STOP  time_ms=");
+                UART_PrintU32(track_time_ms);
+                UART_Print("\r\n");
+            }
+        }
+        /* RUN 中持续刷新计时 */
+        if (track_state == TRACK_RUN) {
+            track_time_ms = now - track_start_ms;
         }
 
 #if OLED_TEST
-        /* OLED 自检: 每 200ms 把运行秒数 + 按键计数刷到屏 (不阻断) */
+        /* OLED: 每 200ms 刷计时 + 状态 + OpenMV 占位 (不阻断) */
         {
             static uint32_t oled_last = 0;
             if (now - oled_last >= 200) {
                 oled_last = now;
-                uint32_t sec = now / 1000;
-                char buf[12];
-                int i = 11;
-                buf[i--] = '\0';
-                if (sec == 0) buf[i--] = '0';
-                uint32_t v = sec;
-                while (v && i >= 0) { buf[i--] = (char)('0' + (v % 10)); v /= 10; }
-                OLED_DrawString(0, 2, "t =");
-                OLED_DrawString(4, 2, &buf[i + 1]);
-                OLED_DrawString(0, 4, "OLED running");
-                OLED_DrawString(0, 5, "BTN:");
-                {
-                    int j = 11;
-                    buf[j--] = '\0';
-                    uint32_t w = btn_count;
-                    if (w == 0) buf[j--] = '0';
-                    while (w && j >= 0) { buf[j--] = (char)('0' + (w % 10)); w /= 10; }
-                    OLED_DrawString(5, 5, &buf[j + 1]);
-                }
+                char buf[16];
+
+                /* 计时 (秒, 一位小数): track_time_ms → xx.x s */
+                uint32_t sec_x10 = track_time_ms / 100;        /* ms → 0.1s */
+                uint32_t ip = sec_x10 / 10, dp = sec_x10 % 10;
+                int i = 0;
+                if (ip >= 10) { buf[i++] = (char)('0' + ip/10); buf[i++] = (char)('0' + ip%10); }
+                else          { buf[i++] = (char)('0' + ip); }
+                buf[i++] = '.'; buf[i++] = (char)('0' + dp); buf[i++] = 's'; buf[i] = '\0';
+                OLED_DrawString(0, 0, "TIME:");
+                OLED_DrawString(6, 0, buf);
+
+                /* 状态 */
+                OLED_DrawString(0, 1, (track_state == TRACK_RUN) ? "RUN " : "STOP");
+
+                /* OpenMV 视觉数据占位 (vis_x10, 0-1000 → 0.0-100.0, 当前 0.0 未装) */
+                uint32_t vip = vis_x10 / 10, vdp = vis_x10 % 10;
+                int j = 0;
+                if      (vip >= 100) { buf[j++]=(char)('0'+vip/100); buf[j++]=(char)('0'+(vip/10)%10); buf[j++]=(char)('0'+vip%10); }
+                else if (vip >= 10)  { buf[j++]=(char)('0'+vip/10); buf[j++]=(char)('0'+vip%10); }
+                else                 { buf[j++]=(char)('0'+vip); }
+                buf[j++] = '.'; buf[j++] = (char)('0'+vdp); buf[j] = '\0';
+                OLED_DrawString(0, 3, "VIS:");
+                OLED_DrawString(5, 3, buf);
+
                 OLED_Refresh();
             }
         }
@@ -482,6 +522,9 @@ int main(void)
         }
 #else
 
+        if (track_state != TRACK_RUN) {
+            MotorDrive_Stop();              /* STOP: 停电机, 不循迹 */
+        } else {                            /* RUN: 才跑循迹 */
         uint8_t bits = LineSensor_Read();
         s_line_raw = bits;
 
@@ -596,6 +639,7 @@ int main(void)
         UART_Print(" R2=");     UART_Putc((char)('0' + ((bits >> 4) & 1)));
         UART_Print("\r\n");
 #endif /* LINE_FOLLOW_VERSION */
+        }  /* end if (track_state == TRACK_RUN) */
 #endif /* MOTOR_TEST_DRIVE */
     }
 }
