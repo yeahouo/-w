@@ -241,16 +241,16 @@ static void line_control_v6(uint8_t bits)
         s_v6_last_err = 0;
         s_v6_correct_count = 0;
         s_v6_correct_dir = 0;
-        MotorDrive_Set(5, 1, 5, 1);
+        MotorDrive_Set(7, 1, 7, 1);
         return;
     }
 
     /* 场景 2: 丢线 → 按 last_err 方向追线 */
     if (bits == 0) {
         err = s_v6_last_err;
-        if      (err < 0) { dl = 1; dr = 5; }
-        else if (err > 0) { dl = 5; dr = 1; }
-        else              { dl = 5; dr = 5; }
+        if      (err < 0) { dl = 1; dr = 7; }
+        else if (err > 0) { dl = 7; dr = 1; }
+        else              { dl = 7; dr = 7; }
         MotorDrive_Set(dl, 1, dr, 1);
         return;
     }
@@ -273,7 +273,7 @@ static void line_control_v6(uint8_t bits)
         int8_t needed_dir = (err < 0) ? +1 : -1;
 
         if (s_v6_correct_dir != 0 && s_v6_correct_dir != needed_dir) {
-            MotorDrive_Set(5, 1, 5, 1);   /* 反向请求 → 直行等回正 */
+            MotorDrive_Set(7, 1, 7, 1);   /* 反向请求 → 直行等回正 */
             return;
         }
 
@@ -284,13 +284,12 @@ static void line_control_v6(uint8_t bits)
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
         if (escalate || dt < V6_DT_FAST_MS) {
-            if (err < 0) { dl = 3; dr = 5; }
-            else         { dl = 5; dr = 3; }
+            if (err < 0) { dl = 6; dr = 7; }   /* 脉冲: 内侧6 角度更小 */
+            else         { dl = 7; dr = 6; }
         } else if (dt < V6_DT_SLOW_MS) {
-            if (err < 0) { dl = 4; dr = 5; }
-            else         { dl = 5; dr = 4; }
+            dl = 7; dr = 7;                     /* 阻尼: 回正完成, 直行 */
         } else {
-            dl = 5; dr = 5;
+            dl = 7; dr = 7;
         }
     }
     /* 场景 4: 大偏离 → 脉冲+阻尼 (err变化瞬间内侧强打, 之后阻尼温和修正) */
@@ -299,16 +298,16 @@ static void line_control_v6(uint8_t bits)
             s_v6_err_change_ms = now;
             s_v6_prev_err = err;
         }
-        /* 脉冲(< PULSE_MS)内侧1强打; 阻尼期: 大弯内侧2(略急), 小弯内侧3(温和) */
-        uint8_t damp = (err == -2 || err == +2) ? 3 : 4;
-        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? 2 : damp;
+        /* 脉冲(< PULSE_MS)内侧4; 阻尼期: 大弯内侧5, 小弯内侧6 (角度细微减小) */
+        uint8_t damp = (err == -2 || err == +2) ? 5 : 6;
+        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? 4 : damp;
         switch (err) {
-            case -2:  dl = inner; dr = 5; break;
-            case -1:  dl = inner; dr = 5; break;
-            case  0:  dl = 5; dr = 5; break;
-            case +1:  dl = 5; dr = inner; break;
-            case +2:  dl = 5; dr = inner; break;
-            default:  dl = 5; dr = 5; break;
+            case -2:  dl = inner; dr = 7; break;
+            case -1:  dl = inner; dr = 7; break;
+            case  0:  dl = 7; dr = 7; break;
+            case +1:  dl = 7; dr = inner; break;
+            case +2:  dl = 7; dr = inner; break;
+            default:  dl = 7; dr = 7; break;
         }
     }
 
@@ -421,6 +420,7 @@ int main(void)
     uint32_t     track_start_ms = 0;
     uint32_t     track_time_ms  = 0;
     uint16_t     vis_x10        = 0;   /* OpenMV 视觉数据 ×10 (0-1000), 占位 0.0 (未装) */
+    uint8_t      s_finish_cnt   = 0;   /* 终点线检测: 中间4路全亮连续帧计数 */
 
     while (1) {
         if (!s_ctrl_flag) {
@@ -527,6 +527,24 @@ int main(void)
         } else {                            /* RUN: 才跑循迹 */
         uint8_t bits = LineSensor_Read();
         s_line_raw = bits;
+
+#if 0  /* 终点自动停 — 暂禁用, 待验证后启用 */
+        /* 终点线检测: 中间4路(S2-S5)全亮 (bits & 0x1E == 0x1E) = 垂直黑长线
+           连续3帧确认(防噪声) → 停车 */
+        if ((bits & 0x1E) == 0x1E) {
+            if (++s_finish_cnt >= 3) {
+                track_state   = TRACK_STOP;
+                track_time_ms = now - track_start_ms;
+                MotorDrive_Stop();
+                UART_Print(">>> FINISH! time_ms=");
+                UART_PrintU32(track_time_ms);
+                UART_Print("\r\n");
+                continue;               /* 跳过循迹, 直接回循环顶 */
+            }
+        } else {
+            s_finish_cnt = 0;            /* 非终点, 清零 */
+        }
+#endif
 
 #if LINE_FOLLOW_VERSION == 8
         /* ============ v8: 加权位置法 + 增益调度 PD + 状态机 ============ */
