@@ -33,10 +33,16 @@ void Button_Init(void);
 bool Button_IsPressed(void);
 
 /**
- * @brief 按下事件 (下降沿)
+ * @brief 短按事件 (下降沿)
  * @return 自上次 Consume 以来是否检测到一次"新按下"; 读后自动清零
  * @note  内部会先调用 Button_IsPressed() 刷新状态
  */
 bool Button_Consume(void);
+
+/**
+ * @brief 长按事件 — 按住超过 LONG_PRESS_MS 触发一次, 松开后才允许再次触发
+ * @return true=刚满长按阈值的那一帧
+ */
+bool Button_ConsumeLong(void);
 
 #endif /* BUTTON_H */

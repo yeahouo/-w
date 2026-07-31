@@ -66,6 +66,10 @@
  * ============================================================ */
 volatile uint32_t g_system_ms = 0;   /* 毫秒时钟 (其他模块 extern 引用) */
 
+/* 循迹模式切换 */
+typedef enum { V6_MODE_1 = 0, V6_MODE_2 = 1 } V6_Mode_t;
+static V6_Mode_t s_v6_mode = V6_MODE_1;   /* 默认模式1 */
+
 static volatile uint8_t s_ctrl_flag;       /* 100Hz 主循环就绪标志 */
 static volatile uint8_t s_tick_100ms;
 
@@ -187,6 +191,16 @@ static void line_control_v6(uint8_t bits)
     uint8_t dl, dr;
     uint32_t now = g_system_ms;
 
+    /* 模式相关参数 */
+    uint8_t straight   = (s_v6_mode == V6_MODE_1) ? 6 : 4;
+    uint8_t straight_s1= (s_v6_mode == V6_MODE_1) ? 6 : 5;   /* 场景1 纯直行 */
+    uint8_t outer      = (s_v6_mode == V6_MODE_1) ? 6 : 4;
+    uint8_t lost_inner = (s_v6_mode == V6_MODE_1) ? 4 : 2;
+    uint8_t s3_pulse   = (s_v6_mode == V6_MODE_1) ? 4 : 2;
+    uint8_t s4_pulse   = 1;                              /* 两个模式共用极激进脉冲 */
+    uint8_t s4_damp_2  = 2;                              /* 大弯阻尼共用 */
+    uint8_t s4_damp_1  = (s_v6_mode == V6_MODE_1) ? 3 : 1;   /* 小弯阻尼 */
+
     /* ★ 直角转弯状态: 原地旋转中 */
     if (s_v6_phase == V6_PHASE_CORNER_SPIN) {
         if (bits == 0b00100) {                 /* M 单亮 = 转够 90° */
@@ -245,16 +259,16 @@ static void line_control_v6(uint8_t bits)
         s_v6_last_err = 0;
         s_v6_correct_count = 0;
         s_v6_correct_dir = 0;
-        MotorDrive_Set(6, 1, 6, 1);
+        MotorDrive_Set(straight_s1, 1, straight_s1, 1);
         return;
     }
 
     /* 场景 2: 丢线 → 按 last_err 方向缓行追线 (弧形圆周补偿) */
     if (bits == 0) {
         err = s_v6_last_err;
-        if      (err < 0) { dl = 4; dr = 6; }
-        else if (err > 0) { dl = 6; dr = 4; }
-        else              { dl = 6; dr = 6; }
+        if      (err < 0) { dl = lost_inner; dr = outer; }
+        else if (err > 0) { dl = outer; dr = lost_inner; }
+        else              { dl = straight; dr = straight; }
         MotorDrive_Set(dl, 1, dr, 1);
         return;
     }
@@ -275,8 +289,8 @@ static void line_control_v6(uint8_t bits)
         int8_t needed_dir = (err < 0) ? +1 : -1;
 
         if (s_v6_correct_dir != 0 && s_v6_correct_dir != needed_dir) {
-            MotorDrive_Set(6, 1, 6, 1);   /* 反向请求 → 直行等回正 */
-            s_v6_last_err = err;           /* 保持 err 更新, 防止丢线后用旧数据 */
+            MotorDrive_Set(straight, 1, straight, 1);   /* 反向请求 → 直行等回正 */
+            s_v6_last_err = err;                        /* 保持 err 更新, 防止丢线后用旧数据 */
             return;
         }
 
@@ -287,12 +301,12 @@ static void line_control_v6(uint8_t bits)
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
         if (escalate || dt < V6_DT_FAST_MS) {
-            if (err < 0) { dl = 4; dr = 6; }   /* 脉冲: 内侧4 */
-            else         { dl = 6; dr = 4; }
+            if (err < 0) { dl = s3_pulse; dr = outer; }   /* 脉冲 */
+            else         { dl = outer; dr = s3_pulse; }
         } else if (dt < V6_DT_SLOW_MS) {
-            dl = 6; dr = 6;                     /* 阻尼: 回正完成, 直行 */
+            dl = straight; dr = straight;                  /* 阻尼: 回正完成, 直行 */
         } else {
-            dl = 6; dr = 6;
+            dl = straight; dr = straight;
         }
     }
     /* 场景 4: 大偏离 → 脉冲+阻尼 (err变化瞬间内侧强打, 之后阻尼温和修正) */
@@ -301,18 +315,16 @@ static void line_control_v6(uint8_t bits)
             s_v6_err_change_ms = now;
             s_v6_prev_err = err;
         }
-        /* 脉冲(< PULSE_MS)内侧1; 阻尼期: 大弯内侧2, 小弯内侧3 */
-        uint8_t damp = (err == -2 || err == +2) ? 2 : 3;
-        if (damp > 6) damp = 6;
-        uint8_t pulse_val = (uint8_t)1;
-        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? pulse_val : damp;
+        /* 脉冲(< PULSE_MS)内侧1; 阻尼期: 大弯内侧2, 小弯内侧2或3 */
+        uint8_t damp = (err == -2 || err == +2) ? s4_damp_2 : s4_damp_1;
+        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? s4_pulse : damp;
         switch (err) {
-            case -2:  dl = inner; dr = 6; break;
-            case -1:  dl = inner; dr = 6; break;
-            case  0:  dl = 6; dr = 6; break;
-            case +1:  dl = 6; dr = inner; break;
-            case +2:  dl = 6; dr = inner; break;
-            default:  dl = 6; dr = 6; break;
+            case -2:  dl = inner; dr = outer; break;
+            case -1:  dl = inner; dr = outer; break;
+            case  0:  dl = straight; dr = straight; break;
+            case +1:  dl = outer; dr = inner; break;
+            case +2:  dl = outer; dr = inner; break;
+            default:  dl = straight; dr = straight; break;
         }
     }
 
@@ -402,6 +414,8 @@ int main(void)
     Button_Init();
     UART_Print("button (PB8) init ok\r\n");
 
+    UART_Print("long-press PB8 (>1s) to switch mode\r\n");
+
 #if LINE_FOLLOW_VERSION == 8
     LineTracker_Init();
     UART_Print("\r\n=== tracer-car LINE_FOLLOW v8 (weighted-PD + gain scheduling) ===\r\n");
@@ -436,7 +450,13 @@ int main(void)
 
         uint32_t now = g_system_ms;
 
-        /* USER 按键: 切换循迹启停 + 计时 */
+        /* 模式切换: PB8 长按 (STOP 或 RUN 均可) */
+        if (Button_ConsumeLong()) {
+            s_v6_mode = (s_v6_mode == V6_MODE_1) ? V6_MODE_2 : V6_MODE_1;
+            UART_Print(s_v6_mode == V6_MODE_1 ? ">>> MODE 1\r\n" : ">>> MODE 2\r\n");
+        }
+
+        /* USER 按键: 短按切换循迹启停 + 计时 */
         if (Button_Consume()) {
             if (track_state == TRACK_STOP) {
                 track_state    = TRACK_RUN;
@@ -476,6 +496,9 @@ int main(void)
 
                 /* 状态 */
                 OLED_DrawString(0, 1, (track_state == TRACK_RUN) ? "RUN " : "STOP");
+
+                /* 模式 */
+                OLED_DrawString(0, 2, (s_v6_mode == V6_MODE_1) ? "M1" : "M2");
 
                 /* OpenMV 视觉数据占位 (vis_x10, 0-1000 → 0.0-100.0, 当前 0.0 未装) */
                 uint32_t vip = vis_x10 / 10, vdp = vis_x10 % 10;
