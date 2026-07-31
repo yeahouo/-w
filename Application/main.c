@@ -159,10 +159,8 @@ static void line_control_simple(uint8_t bits)
 #define V6_CORNER_WINDOW_MS  (50u)
 #define V6_CORNER_TIMEOUT_MS (1500u)
 #define V6_SPIN_DUTY         (3u)
-#define V6_DT_FAST_MS        (67u)   /* 回正脉冲窗 */
 #define V6_DT_SLOW_MS        (200u)
 #define V6_CORRECT_ESCALATE  (2u)    /* escalate 门槛: 200ms 触发修正 */
-#define V6_TURN_PULSE_MS     (73u)   /* 场景4 转弯脉冲 */
 
 static int8_t   s_v6_last_err = 0;
 static uint32_t s_v6_m_only_tick = 0;
@@ -192,14 +190,18 @@ static void line_control_v6(uint8_t bits)
     uint32_t now = g_system_ms;
 
     /* 模式相关参数 */
-    uint8_t straight   = (s_v6_mode == V6_MODE_1) ? 6 : 4;
-    uint8_t straight_s1= (s_v6_mode == V6_MODE_1) ? 6 : 5;   /* 场景1 纯直行 */
-    uint8_t outer      = (s_v6_mode == V6_MODE_1) ? 6 : 4;
+    uint8_t straight   = (s_v6_mode == V6_MODE_1) ? 7 : 4;
+    uint8_t straight_s1= (s_v6_mode == V6_MODE_1) ? 7 : 5;   /* 场景1 纯直行 */
+    uint8_t outer      = (s_v6_mode == V6_MODE_1) ? 7 : 4;
     uint8_t lost_inner = (s_v6_mode == V6_MODE_1) ? 4 : 2;
     uint8_t s3_pulse   = (s_v6_mode == V6_MODE_1) ? 4 : 2;
     uint8_t s4_pulse   = 1;                              /* 两个模式共用极激进脉冲 */
     uint8_t s4_damp_2  = 2;                              /* 大弯阻尼共用 */
     uint8_t s4_damp_1  = (s_v6_mode == V6_MODE_1) ? 3 : 1;   /* 小弯阻尼 */
+
+    /* 脉冲窗口 — M1 短窗口减晃, M2 长窗口稳球 */
+    uint32_t s3_pulse_ms = (s_v6_mode == V6_MODE_1) ? 40 : 67;   /* 场景3 回正脉冲窗 */
+    uint32_t s4_pulse_ms = (s_v6_mode == V6_MODE_1) ? 50 : 73;   /* 场景4 转弯脉冲窗 */
 
     /* ★ 直角转弯状态: 原地旋转中 */
     if (s_v6_phase == V6_PHASE_CORNER_SPIN) {
@@ -300,7 +302,7 @@ static void line_control_v6(uint8_t bits)
         if (dt < 1) dt = 1;
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
-        if (escalate || dt < V6_DT_FAST_MS) {
+        if (escalate || dt < s3_pulse_ms) {
             if (err < 0) { dl = s3_pulse; dr = outer; }   /* 脉冲 */
             else         { dl = outer; dr = s3_pulse; }
         } else if (dt < V6_DT_SLOW_MS) {
@@ -317,7 +319,7 @@ static void line_control_v6(uint8_t bits)
         }
         /* 脉冲(< PULSE_MS)内侧1; 阻尼期: 大弯内侧2, 小弯内侧2或3 */
         uint8_t damp = (err == -2 || err == +2) ? s4_damp_2 : s4_damp_1;
-        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? s4_pulse : damp;
+        uint8_t inner = ((now - s_v6_err_change_ms) < s4_pulse_ms) ? s4_pulse : damp;
         switch (err) {
             case -2:  dl = inner; dr = outer; break;
             case -1:  dl = inner; dr = outer; break;
