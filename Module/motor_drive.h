@@ -36,6 +36,9 @@ void MotorDrive_Tick(void);
 /* 两轮全停 (duty=0 + 清方向) */
 void MotorDrive_Stop(void);
 
+/* 两轮锁死 (TB6612 短接制动, 防止溜车) */
+void MotorDrive_Brake(void);
+
 /* 当前 duty 查询 (日志用) */
 uint8_t MotorDrive_GetLeftDuty(void);
 uint8_t MotorDrive_GetRightDuty(void);

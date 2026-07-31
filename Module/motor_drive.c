@@ -31,8 +31,8 @@
 
 /* 电机极性: +1=默认, -1=翻转。
  * 两轮同向安装 (+1 时皆后退), 两轮都翻 (-1) 使 dir=1 = 物理前进 (车头朝前)。 */
-#define LEFT_MOTOR_POLARITY   (-1)
-#define RIGHT_MOTOR_POLARITY  (-1)
+#define LEFT_MOTOR_POLARITY   (+1)
+#define RIGHT_MOTOR_POLARITY  (+1)
 
 /* 软件 PWM: SysTick 2kHz × 20 档 → 100Hz PWM, 占空比 0~20 */
 #define PWM_PHASE_MAX   20
@@ -44,6 +44,7 @@ static volatile uint8_t s_l_duty = 0;
 static volatile uint8_t s_r_duty = 0;
 static volatile uint8_t s_l_dir  = 0;
 static volatile uint8_t s_r_dir  = 0;
+static volatile bool    s_braked = false;
 
 /* ============================================================
  *  方向应用 — 把 duty/dir 翻译到 AIN/BIN 方向脚
@@ -93,6 +94,7 @@ void MotorDrive_Init(void)
 
 void MotorDrive_Set(uint8_t ld, uint8_t ldir, uint8_t rd, uint8_t rdir)
 {
+    s_braked = false;
     s_l_duty = ld;
     s_r_duty = rd;
     s_l_dir  = ldir;
@@ -102,13 +104,24 @@ void MotorDrive_Set(uint8_t ld, uint8_t ldir, uint8_t rd, uint8_t rdir)
 
 void MotorDrive_Stop(void)
 {
+    s_braked = false;
     s_l_duty = 0;
     s_r_duty = 0;
     apply_dir();
 }
 
+void MotorDrive_Brake(void)
+{
+    /* TB6612 短接制动: IN1=IN2=HIGH + PWM=HIGH → 电机绕组短路, 锁死 */
+    s_braked = true;
+    DL_GPIO_setPins(GPIOA, AIN1_PIN | AIN2_PIN | BIN1_PIN | BIN2_PIN);
+    DL_GPIO_setPins(GPIOB, PWMA_PIN | PWMB_PIN);
+}
+
 void MotorDrive_Tick(void)
 {
+    if (s_braked) return;   /* 锁死态: 保持 GPIO 不变 */
+
     /* 此函数由 SysTick_Handler (2kHz, 中断上下文) 调用 — 仅 GPIO 翻转, 无阻塞 */
     static uint8_t pwm_phase = 0;
 

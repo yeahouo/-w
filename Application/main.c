@@ -87,7 +87,7 @@ void SysTick_Handler(void)
     MotorDrive_Tick();   /* 软件 PWM (模块内, 仅 GPIO 翻转, 中断安全) */
     Servo_Tick();        /* 舵机软件 PWM (PA0, 50Hz) */
 
-    if (++s_tick_100ms >= 200) {
+    if (++s_tick_100ms >= 29) {    /* ~69Hz, 14.5ms 周期 */
         s_tick_100ms = 0;
         s_ctrl_flag = 1;
     }
@@ -155,10 +155,10 @@ static void line_control_simple(uint8_t bits)
 #define V6_CORNER_WINDOW_MS  (50u)
 #define V6_CORNER_TIMEOUT_MS (1500u)
 #define V6_SPIN_DUTY         (3u)
-#define V6_DT_FAST_MS        (30u)   /* 回正急档时间窗: 50→30 缩短强修, 减过冲摆动 */
+#define V6_DT_FAST_MS        (67u)   /* 回正脉冲窗 */
 #define V6_DT_SLOW_MS        (200u)
-#define V6_CORRECT_ESCALATE  (3u)
-#define V6_TURN_PULSE_MS     (50u)  /* 场景4 转弯脉冲: err变化后内侧强打方向持续时间 */
+#define V6_CORRECT_ESCALATE  (2u)    /* escalate 门槛: 200ms 触发修正 */
+#define V6_TURN_PULSE_MS     (73u)   /* 场景4 转弯脉冲 */
 
 static int8_t   s_v6_last_err = 0;
 static uint32_t s_v6_m_only_tick = 0;
@@ -234,23 +234,27 @@ static void line_control_v6(uint8_t bits)
         return;
     }
 
-    /* 场景 1: 中间 S3/S4 命中且最外无 = 直行 */
-    if ((bits & 0b001100) && !(bits & 0b110011)) {
+    /* M 活跃即刷新 dt (保证脉冲窗有效, 不影响后续场景 3 入口) */
+    if (bits & 0b001100) {
         s_v6_m_only_tick = now;
         s_v6_has_m_baseline = true;
+    }
+
+    /* 场景 1: 纯直行 — M 活跃且最外无干扰 */
+    if ((bits & 0b001100) && !(bits & 0b110011)) {
         s_v6_last_err = 0;
         s_v6_correct_count = 0;
         s_v6_correct_dir = 0;
-        MotorDrive_Set(7, 1, 7, 1);
+        MotorDrive_Set(6, 1, 6, 1);
         return;
     }
 
-    /* 场景 2: 丢线 → 按 last_err 方向追线 */
+    /* 场景 2: 丢线 → 按 last_err 方向缓行追线 (弧形圆周补偿) */
     if (bits == 0) {
         err = s_v6_last_err;
-        if      (err < 0) { dl = 1; dr = 7; }
-        else if (err > 0) { dl = 7; dr = 1; }
-        else              { dl = 7; dr = 7; }
+        if      (err < 0) { dl = 4; dr = 6; }
+        else if (err > 0) { dl = 6; dr = 4; }
+        else              { dl = 6; dr = 6; }
         MotorDrive_Set(dl, 1, dr, 1);
         return;
     }
@@ -263,8 +267,6 @@ static void line_control_v6(uint8_t bits)
     else if (bits & 0b001100) err =  0;   /* S3/S4 中间 = 直行 */
     else                      err =  0;
 
-    err = (int8_t)(-err);   /* 转向修正 (左碰→右转, 右碰→左转) */
-
     s_v6_last_err = err;
 
     /* 场景 3: 次外命中 (err=±1) 且 M 也命中 且 有基准 → 夹角修正 + 方向锁 */
@@ -273,7 +275,8 @@ static void line_control_v6(uint8_t bits)
         int8_t needed_dir = (err < 0) ? +1 : -1;
 
         if (s_v6_correct_dir != 0 && s_v6_correct_dir != needed_dir) {
-            MotorDrive_Set(7, 1, 7, 1);   /* 反向请求 → 直行等回正 */
+            MotorDrive_Set(6, 1, 6, 1);   /* 反向请求 → 直行等回正 */
+            s_v6_last_err = err;           /* 保持 err 更新, 防止丢线后用旧数据 */
             return;
         }
 
@@ -284,12 +287,12 @@ static void line_control_v6(uint8_t bits)
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
         if (escalate || dt < V6_DT_FAST_MS) {
-            if (err < 0) { dl = 6; dr = 7; }   /* 脉冲: 内侧6 角度更小 */
-            else         { dl = 7; dr = 6; }
+            if (err < 0) { dl = 4; dr = 6; }   /* 脉冲: 内侧4 */
+            else         { dl = 6; dr = 4; }
         } else if (dt < V6_DT_SLOW_MS) {
-            dl = 7; dr = 7;                     /* 阻尼: 回正完成, 直行 */
+            dl = 6; dr = 6;                     /* 阻尼: 回正完成, 直行 */
         } else {
-            dl = 7; dr = 7;
+            dl = 6; dr = 6;
         }
     }
     /* 场景 4: 大偏离 → 脉冲+阻尼 (err变化瞬间内侧强打, 之后阻尼温和修正) */
@@ -298,16 +301,18 @@ static void line_control_v6(uint8_t bits)
             s_v6_err_change_ms = now;
             s_v6_prev_err = err;
         }
-        /* 脉冲(< PULSE_MS)内侧4; 阻尼期: 大弯内侧5, 小弯内侧6 (角度细微减小) */
-        uint8_t damp = (err == -2 || err == +2) ? 5 : 6;
-        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? 4 : damp;
+        /* 脉冲(< PULSE_MS)内侧1; 阻尼期: 大弯内侧2, 小弯内侧3 */
+        uint8_t damp = (err == -2 || err == +2) ? 2 : 3;
+        if (damp > 6) damp = 6;
+        uint8_t pulse_val = (uint8_t)1;
+        uint8_t inner = ((now - s_v6_err_change_ms) < V6_TURN_PULSE_MS) ? pulse_val : damp;
         switch (err) {
-            case -2:  dl = inner; dr = 7; break;
-            case -1:  dl = inner; dr = 7; break;
-            case  0:  dl = 7; dr = 7; break;
-            case +1:  dl = 7; dr = inner; break;
-            case +2:  dl = 7; dr = inner; break;
-            default:  dl = 7; dr = 7; break;
+            case -2:  dl = inner; dr = 6; break;
+            case -1:  dl = inner; dr = 6; break;
+            case  0:  dl = 6; dr = 6; break;
+            case +1:  dl = 6; dr = inner; break;
+            case +2:  dl = 6; dr = inner; break;
+            default:  dl = 6; dr = 6; break;
         }
     }
 
@@ -440,7 +445,7 @@ int main(void)
             } else {
                 track_state   = TRACK_STOP;
                 track_time_ms = now - track_start_ms;
-                MotorDrive_Stop();
+                MotorDrive_Brake();
                 UART_Print(">>> TRACK STOP  time_ms=");
                 UART_PrintU32(track_time_ms);
                 UART_Print("\r\n");
@@ -528,23 +533,19 @@ int main(void)
         uint8_t bits = LineSensor_Read();
         s_line_raw = bits;
 
-#if 0  /* 终点自动停 — 暂禁用, 待验证后启用 */
-        /* 终点线检测: 中间4路(S2-S5)全亮 (bits & 0x1E == 0x1E) = 垂直黑长线
-           连续3帧确认(防噪声) → 停车 */
-        if ((bits & 0x1E) == 0x1E) {
-            if (++s_finish_cnt >= 3) {
-                track_state   = TRACK_STOP;
-                track_time_ms = now - track_start_ms;
-                MotorDrive_Stop();
-                UART_Print(">>> FINISH! time_ms=");
-                UART_PrintU32(track_time_ms);
-                UART_Print("\r\n");
-                continue;               /* 跳过循迹, 直接回循环顶 */
-            }
-        } else {
-            s_finish_cnt = 0;            /* 非终点, 清零 */
+        /* 终点自动停: 灭(黑线)>=4路 = 终点宽黑线 (bit=1=灭/黑线)
+           循迹时灭1-2路(窄线), 终点时灭4+路(宽线) */
+        uint8_t on_cnt = 0;
+        for (uint8_t i = 0; i < 6; i++) if (bits & (1u << i)) on_cnt++;
+        if (on_cnt >= 4) {
+            track_state   = TRACK_STOP;
+            track_time_ms = now - track_start_ms;
+            MotorDrive_Brake();
+            UART_Print(">>> FINISH! time_ms=");
+            UART_PrintU32(track_time_ms);
+            UART_Print("\r\n");
+            continue;               /* 跳过循迹, 直接回循环顶 */
         }
-#endif
 
 #if LINE_FOLLOW_VERSION == 8
         /* ============ v8: 加权位置法 + 增益调度 PD + 状态机 ============ */
