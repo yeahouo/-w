@@ -91,7 +91,7 @@ void SysTick_Handler(void)
     MotorDrive_Tick();   /* 软件 PWM (模块内, 仅 GPIO 翻转, 中断安全) */
     Servo_Tick();        /* 舵机软件 PWM (PA0, 50Hz) */
 
-    if (++s_tick_100ms >= 29) {    /* ~69Hz, 14.5ms 周期 */
+    if (++s_tick_100ms >= (s_v6_mode == V6_MODE_1 ? 13 : 29)) {    /* M1≈154Hz M2≈69Hz */
         s_tick_100ms = 0;
         s_ctrl_flag = 1;
     }
@@ -169,6 +169,8 @@ static uint8_t  s_v6_correct_count = 0;
 static int8_t   s_v6_correct_dir = 0;
 static int8_t   s_v6_prev_err = 0;       /* 场景4: 上次 err (检测变化触发脉冲) */
 static uint32_t s_v6_err_change_ms = 0;  /* 场景4: err 最近变化时刻 */
+static uint8_t  s_v6_round = 0;          /* 回正轮次 (每次新correct_dir+1, 场景1清零) */
+static uint8_t  s_v6_straight_cnt = 0;   /* 连续纯M帧计数 (多帧确认直线) */
 
 typedef enum {
     V6_PHASE_NORMAL = 0,
@@ -191,7 +193,7 @@ static void line_control_v6(uint8_t bits)
 
     /* 模式相关参数 */
     uint8_t straight   = (s_v6_mode == V6_MODE_1) ? 7 : 4;
-    uint8_t straight_s1= (s_v6_mode == V6_MODE_1) ? 7 : 5;   /* 场景1 纯直行 */
+    uint8_t straight_s1= (s_v6_mode == V6_MODE_1) ? 8 : 5;   /* 场景1 纯直行 */
     uint8_t outer      = (s_v6_mode == V6_MODE_1) ? 7 : 4;
     uint8_t lost_inner = (s_v6_mode == V6_MODE_1) ? 4 : 2;
     uint8_t s3_pulse   = (s_v6_mode == V6_MODE_1) ? 4 : 2;
@@ -256,11 +258,21 @@ static void line_control_v6(uint8_t bits)
         s_v6_has_m_baseline = true;
     }
 
-    /* 场景 1: 纯直行 — M 活跃且最外无干扰 */
-    if ((bits & 0b001100) && !(bits & 0b110011)) {
+    /* 纯M帧计数 — M1 需连续多帧确认直线, M2 1帧即可 */
+    bool is_pure_straight = (bits & 0b001100) && !(bits & 0b110011);
+    uint8_t straight_frames = (s_v6_mode == V6_MODE_1) ? 4 : 1;
+    if (is_pure_straight) {
+        s_v6_straight_cnt++;
+    } else {
+        s_v6_straight_cnt = 0;
+    }
+
+    /* 场景 1: 纯直行 — 连续 N 帧确认后才退出回正 */
+    if (s_v6_straight_cnt >= straight_frames) {
         s_v6_last_err = 0;
         s_v6_correct_count = 0;
         s_v6_correct_dir = 0;
+        s_v6_round = 0;         /* 重置回正轮次 */
         MotorDrive_Set(straight_s1, 1, straight_s1, 1);
         return;
     }
@@ -296,13 +308,22 @@ static void line_control_v6(uint8_t bits)
             return;
         }
 
+        /* 新回正轮次: 每次 correct_dir 从 0→非0 计数+1 */
+        if (s_v6_correct_dir == 0) s_v6_round++;
         s_v6_correct_dir = needed_dir;
         s_v6_correct_count++;
         uint32_t dt = now - s_v6_m_only_tick;
         if (dt < 1) dt = 1;
         bool escalate = (s_v6_correct_count >= V6_CORRECT_ESCALATE);
 
-        if (escalate || dt < s3_pulse_ms) {
+        /* M1 渐进缩脉冲: 每轮减 10ms, 最小 10ms */
+        uint32_t pulse_ms = s3_pulse_ms;
+        if (s_v6_mode == V6_MODE_1 && s_v6_round > 1) {
+            uint32_t reduction = (s_v6_round - 1) * 10u;
+            pulse_ms = (s3_pulse_ms > reduction) ? (s3_pulse_ms - reduction) : 10u;
+        }
+
+        if (escalate || dt < pulse_ms) {
             if (err < 0) { dl = s3_pulse; dr = outer; }   /* 脉冲 */
             else         { dl = outer; dr = s3_pulse; }
         } else if (dt < V6_DT_SLOW_MS) {
